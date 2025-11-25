@@ -215,10 +215,10 @@ export async function mintMaxLiquidity(
         configuredPool.token1.address === WETH_TOKEN.address
             ? balWETH
             : balUSDC;
-    
+
     // Calculate 99.9% of balance to avoid rounding errors causing reverts
     // BigInt math: amount * 999 / 1000
-    // to ensure there is always a tiny bit more tokens in the wallet than the contract asks for. 
+    // to ensure there is always a tiny bit more tokens in the wallet than the contract asks for.
     // This prevents "Insufficient Balance" reverts caused by tiny math discrepancies between the SDK and the Smart Contract.
     const amount0Safe = (amount0Input * 999n) / 1000n;
     const amount1Safe = (amount1Input * 999n) / 1000n;
@@ -255,14 +255,14 @@ export async function mintMaxLiquidity(
         NPM_ABI,
         wallet
     );
-    const tx = await npm.mint(mintParams);
+    const tx = await npm.mint(mintParams, { gasLimit: 500_000 });
     const receipt = await waitWithTimeout(tx, TX_TIMEOUT_MS);
 
     const transferEventSig = ethers.id("Transfer(address,address,uint256)");
 
     const transferLog = receipt.logs.find((log: any) => {
         if (log.topics[0] !== transferEventSig) return false;
-        
+
         try {
             const toAddress = ethers.dataSlice(log.topics[2], 12); // Take last 20 bytes
             return ethers.getAddress(toAddress) === wallet.address;
@@ -284,10 +284,17 @@ export async function mintMaxLiquidity(
     return newTokenId;
 }
 
-
 // Full Rebalancing Process: Remove Old -> Swap -> Refresh Price -> Mint New
-export async function executeFullRebalance(wallet: ethers.Wallet, configuredPool: Pool, oldTokenId: string) {
-    const npm = new ethers.Contract(NONFUNGIBLE_POSITION_MANAGER_ADDR, NPM_ABI, wallet);
+export async function executeFullRebalance(
+    wallet: ethers.Wallet,
+    configuredPool: Pool,
+    oldTokenId: string
+) {
+    const npm = new ethers.Contract(
+        NONFUNGIBLE_POSITION_MANAGER_ADDR,
+        NPM_ABI,
+        wallet
+    );
 
     // 1. Burn old position if exists
     if (oldTokenId !== "0") {
@@ -300,20 +307,28 @@ export async function executeFullRebalance(wallet: ethers.Wallet, configuredPool
     // ============================================================
     // Refresh Pool State After Swap
     // ============================================================
-    console.log("   [System] Refreshing market price and liquidity after swap...");
-    
+    console.log(
+        "   [System] Refreshing market price and liquidity after swap..."
+    );
+
     // Explicitly passing V3_FACTORY_ADDR is required for Sepolia
-    const poolAddr = Pool.getAddress(USDC_TOKEN, WETH_TOKEN, POOL_FEE, undefined, V3_FACTORY_ADDR);
+    const poolAddr = Pool.getAddress(
+        USDC_TOKEN,
+        WETH_TOKEN,
+        POOL_FEE,
+        undefined,
+        V3_FACTORY_ADDR
+    );
     const poolContract = new ethers.Contract(poolAddr, POOL_ABI, wallet);
-    
+
     // Fetch fresh slot0 AND liquidity
     const [newSlot0, newLiquidity] = await Promise.all([
         poolContract.slot0(),
-        poolContract.liquidity()
+        poolContract.liquidity(),
     ]);
-    
+
     const newCurrentTick = Number(newSlot0.tick);
-    
+
     // Create a FRESH pool instance for accurate Mint math
     const freshPool = new Pool(
         USDC_TOKEN,
@@ -323,20 +338,26 @@ export async function executeFullRebalance(wallet: ethers.Wallet, configuredPool
         newLiquidity.toString(),
         newCurrentTick
     );
-    
-    console.log(`   [Update] Price moved from ${configuredPool.tickCurrent} to ${newCurrentTick}`);
+
+    console.log(
+        `   [Update] Price moved from ${configuredPool.tickCurrent} to ${newCurrentTick}`
+    );
 
     // 3. Calculate new Tick Range
     const tickSpace = freshPool.tickSpacing;
-    const WIDTH = 2000; 
+    const WIDTH = 2000;
     const MIN_TICK = -887272;
     const MAX_TICK = 887272;
 
-    let tickLower = Math.floor((newCurrentTick - WIDTH) / tickSpace) * tickSpace;
-    let tickUpper = Math.floor((newCurrentTick + WIDTH) / tickSpace) * tickSpace;
+    let tickLower =
+        Math.floor((newCurrentTick - WIDTH) / tickSpace) * tickSpace;
+    let tickUpper =
+        Math.floor((newCurrentTick + WIDTH) / tickSpace) * tickSpace;
 
-    if (tickLower < MIN_TICK) tickLower = Math.ceil(MIN_TICK / tickSpace) * tickSpace;
-    if (tickUpper > MAX_TICK) tickUpper = Math.floor(MAX_TICK / tickSpace) * tickSpace;
+    if (tickLower < MIN_TICK)
+        tickLower = Math.ceil(MIN_TICK / tickSpace) * tickSpace;
+    if (tickUpper > MAX_TICK)
+        tickUpper = Math.floor(MAX_TICK / tickSpace) * tickSpace;
 
     if (tickLower === tickUpper) tickUpper += tickSpace;
     if (tickUpper > MAX_TICK) {
@@ -348,7 +369,12 @@ export async function executeFullRebalance(wallet: ethers.Wallet, configuredPool
     console.log(`   New Range: [${tickLower}, ${tickUpper}]`);
 
     // 4. Mint (Using the FRESH pool instance)
-    const newTokenId = await mintMaxLiquidity(wallet, freshPool, tickLower, tickUpper);
+    const newTokenId = await mintMaxLiquidity(
+        wallet,
+        freshPool,
+        tickLower,
+        tickUpper
+    );
 
     // 5. Save State
     saveState(newTokenId);
