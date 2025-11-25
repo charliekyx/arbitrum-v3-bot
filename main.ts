@@ -13,7 +13,13 @@ import {
 } from "./config";
 import { sleep, withRetry } from "./src/utils";
 import { loadState, saveState } from "./src/state";
-import { approveAll, atomicExitPosition, rebalancePortfolio, mintMaxLiquidity } from "./src/actions";
+import {
+    approveAll,
+    atomicExitPosition,
+    rebalancePortfolio,
+    mintMaxLiquidity,
+    executeFullRebalance,
+} from "./src/actions";
 
 dotenv.config();
 
@@ -25,11 +31,22 @@ async function runLifeCycle() {
     const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
     const wallet = new ethers.Wallet(process.env.PRIVATE_KEY!, provider);
 
-    const poolAddr = Pool.getAddress(USDC_TOKEN, WETH_TOKEN, POOL_FEE, undefined, V3_FACTORY_ADDR);
+    const poolAddr = Pool.getAddress(
+        USDC_TOKEN,
+        WETH_TOKEN,
+        POOL_FEE,
+        undefined,
+        V3_FACTORY_ADDR
+    );
     const poolContract = new ethers.Contract(poolAddr, POOL_ABI, provider);
-    const npm = new ethers.Contract(NONFUNGIBLE_POSITION_MANAGER_ADDR, NPM_ABI, wallet);
+    const npm = new ethers.Contract(
+        NONFUNGIBLE_POSITION_MANAGER_ADDR,
+        NPM_ABI,
+        wallet
+    );
 
     console.log(`\n[System] Cycle Start | ${new Date().toISOString()}`);
+
     await approveAll(wallet);
 
     const [slot0, liquidity] = await withRetry(() =>
@@ -58,23 +75,7 @@ async function runLifeCycle() {
     // Branch A: Create new Position
     if (tokenId === "0") {
         console.log(`   [Action] No position. Starting fresh.`);
-        await rebalancePortfolio(wallet, configuredPool);
-
-        // Refresh Data after Swap
-        const newSlot0 = await poolContract.slot0();
-        const newTick = Number(newSlot0.tick);
-
-        // Range Calculation
-        const tickSpace = configuredPool.tickSpacing;
-        const WIDTH = 2000;
-
-        let tl = Math.floor((newTick - WIDTH) / tickSpace) * tickSpace;
-        let tu = Math.floor((newTick + WIDTH) / tickSpace) * tickSpace;
-        if (tl === tu) tu += tickSpace;
-        if (tl > tu) [tl, tu] = [tu, tl];
-
-        const newId = await mintMaxLiquidity(wallet, configuredPool, tl, tu);
-        saveState(newId);
+        await executeFullRebalance(wallet, configuredPool, "0");
         return;
     }
 
@@ -83,7 +84,9 @@ async function runLifeCycle() {
         const pos = await withRetry(() => npm.positions(tokenId));
 
         if (pos.liquidity === 0n && pos.tickLower === 0n) {
-            console.warn(`   [Warning] Position ${tokenId} is dead. Resetting.`);
+            console.warn(
+                `   [Warning] Position ${tokenId} is dead. Resetting.`
+            );
             saveState("0");
             return;
         }
@@ -92,31 +95,15 @@ async function runLifeCycle() {
         const tu = Number(pos.tickUpper);
 
         if (currentTick < tl || currentTick > tu) {
-            console.log(`   [Action] Out of Range! (${tl} < ${currentTick} < ${tu})`);
-
-            // 1. Atomic Exit
-            await atomicExitPosition(wallet, tokenId);
-
-            // 2. Rebalance
-            await rebalancePortfolio(wallet, configuredPool);
-
-            // 3. Refresh Data
-            const finalSlot0 = await poolContract.slot0();
-            const finalTick = Number(finalSlot0.tick);
-
-            // 4. Calc New Range
-            const tickSpace = configuredPool.tickSpacing;
-            const WIDTH = 2000;
-            let newTl = Math.floor((finalTick - WIDTH) / tickSpace) * tickSpace;
-            let newTu = Math.floor((finalTick + WIDTH) / tickSpace) * tickSpace;
-            if (newTl === newTu) newTu += tickSpace;
-            if (newTl > newTu) [newTl, newTu] = [newTu, newTl];
-
-            // 5. Mint
-            const newId = await mintMaxLiquidity(wallet, configuredPool, newTl, newTu);
-            saveState(newId);
-        } else {
-            console.log(`   [Status] In Range.`);
+            if (currentTick < tl || currentTick > tu) {
+                console.log(
+                    `   [Action] Out of Range! (${tl} < ${currentTick} < ${tu})`
+                );
+                // Trigger the full atomic rebalance workflow
+                await executeFullRebalance(wallet, configuredPool, tokenId);
+            } else {
+                console.log(`   [Status] In Range.`);
+            }
         }
     } catch (e) {
         console.error(`   [Error] Cycle failed:`, e);
@@ -129,6 +116,8 @@ async function main() {
             await runLifeCycle();
         } catch (e) {
             console.error("[Fatal] Main loop error:", e);
+            // Prevent infinite rapid loops if RPC is down
+            await sleep(10000);
         }
         console.log(`[System] Sleeping 5 min...`);
         await sleep(5 * 60 * 1000);

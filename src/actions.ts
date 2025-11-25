@@ -13,11 +13,17 @@ import {
     MAX_UINT128,
     SLIPPAGE_TOLERANCE,
     TX_TIMEOUT_MS,
+    POOL_ABI,
+    V3_FACTORY_ADDR,
 } from "../config";
 import { withRetry, waitWithTimeout } from "./utils";
+import { saveState } from "./state";
 
 // --- Wallet Utilities ---
-export async function getBalance(token: Token, wallet: ethers.Wallet): Promise<bigint> {
+export async function getBalance(
+    token: Token,
+    wallet: ethers.Wallet
+): Promise<bigint> {
     const contract = new ethers.Contract(token.address, ERC20_ABI, wallet);
     return await withRetry(() => contract.balanceOf(wallet.address));
 }
@@ -29,9 +35,13 @@ export async function approveAll(wallet: ethers.Wallet) {
     for (const token of tokens) {
         const contract = new ethers.Contract(token.address, ERC20_ABI, wallet);
         for (const spender of spenders) {
-            const allowance = await withRetry(() => contract.allowance(wallet.address, spender));
+            const allowance = await withRetry(() =>
+                contract.allowance(wallet.address, spender)
+            );
             if (allowance === 0n) {
-                console.log(`[Approve] Authorizing ${token.symbol} for ${spender}...`);
+                console.log(
+                    `[Approve] Authorizing ${token.symbol} for ${spender}...`
+                );
                 const tx = await contract.approve(spender, ethers.MaxUint256);
                 await waitWithTimeout(tx, TX_TIMEOUT_MS);
                 console.log(`[Approve] Success.`);
@@ -41,9 +51,16 @@ export async function approveAll(wallet: ethers.Wallet) {
 }
 
 // --- Core Actions ---
-export async function atomicExitPosition(wallet: ethers.Wallet, tokenId: string) {
+export async function atomicExitPosition(
+    wallet: ethers.Wallet,
+    tokenId: string
+) {
     console.log(`\n[Exit] Executing Atomic Exit for Token ${tokenId}...`);
-    const npm = new ethers.Contract(NONFUNGIBLE_POSITION_MANAGER_ADDR, NPM_ABI, wallet);
+    const npm = new ethers.Contract(
+        NONFUNGIBLE_POSITION_MANAGER_ADDR,
+        NPM_ABI,
+        wallet
+    );
 
     const pos = await withRetry(() => npm.positions(tokenId));
     const liquidity = pos.liquidity;
@@ -60,7 +77,9 @@ export async function atomicExitPosition(wallet: ethers.Wallet, tokenId: string)
             amount1Min: 0,
             deadline: Math.floor(Date.now() / 1000) + 120,
         };
-        calls.push(iface.encodeFunctionData("decreaseLiquidity", [decreaseData]));
+        calls.push(
+            iface.encodeFunctionData("decreaseLiquidity", [decreaseData])
+        );
     }
 
     // 2. Collect Fees
@@ -76,7 +95,7 @@ export async function atomicExitPosition(wallet: ethers.Wallet, tokenId: string)
     calls.push(iface.encodeFunctionData("burn", [tokenId]));
 
     try {
-        const tx = await npm.multicall(calls);
+        const tx = await npm.multicall(calls, { value: 0 });
         await waitWithTimeout(tx, TX_TIMEOUT_MS);
         console.log(`   Atomic Exit Successful! (Tx: ${tx.hash})`);
     } catch (e) {
@@ -85,7 +104,10 @@ export async function atomicExitPosition(wallet: ethers.Wallet, tokenId: string)
     }
 }
 
-export async function rebalancePortfolio(wallet: ethers.Wallet, configuredPool: Pool) {
+export async function rebalancePortfolio(
+    wallet: ethers.Wallet,
+    configuredPool: Pool
+) {
     console.log(`\n[Rebalance] Calculating Optimal Swap...`);
 
     const balUSDC = await getBalance(USDC_TOKEN, wallet);
@@ -96,23 +118,39 @@ export async function rebalancePortfolio(wallet: ethers.Wallet, configuredPool: 
             ? configuredPool.token0Price
             : configuredPool.token1Price;
 
-    const wethAmount = CurrencyAmount.fromRawAmount(WETH_TOKEN, balWETH.toString());
-    const usdcAmount = CurrencyAmount.fromRawAmount(USDC_TOKEN, balUSDC.toString());
+    const wethAmount = CurrencyAmount.fromRawAmount(
+        WETH_TOKEN,
+        balWETH.toString()
+    );
+    const usdcAmount = CurrencyAmount.fromRawAmount(
+        USDC_TOKEN,
+        balUSDC.toString()
+    );
     const wethValueInUsdc = priceWethToUsdc.quote(wethAmount);
 
-    const router = new ethers.Contract(SWAP_ROUTER_ADDR, SWAP_ROUTER_ABI, wallet);
+    const router = new ethers.Contract(
+        SWAP_ROUTER_ADDR,
+        SWAP_ROUTER_ABI,
+        wallet
+    );
+
+    // 5 USDC (6 decimals) = 5,000,000
+    const THRESHOLD_USDC = 5_000_000n;
+    // 0.002 WETH (18 decimals) = 2,000,000,000,000,000
+    const THRESHOLD_WETH = 2_000_000_000_000_000n;
 
     if (usdcAmount.greaterThan(wethValueInUsdc)) {
         // Sell USDC
         const diff = usdcAmount.subtract(wethValueInUsdc);
         const amountToSell = diff.divide(2);
 
-        if (parseFloat(amountToSell.toExact()) < 5) {
+        if (BigInt(amountToSell.quotient.toString()) < THRESHOLD_USDC) {
             console.log("   Balance is good enough. Skipping swap.");
             return;
         }
-
-        console.log(`   [Swap] Selling ${amountToSell.toSignificant(6)} USDC for WETH`);
+        console.log(
+            `   [Swap] Selling ${amountToSell.toSignificant(6)} USDC for WETH`
+        );
 
         const tx = await router.exactInputSingle({
             tokenIn: USDC_TOKEN.address,
@@ -137,12 +175,14 @@ export async function rebalancePortfolio(wallet: ethers.Wallet, configuredPool: 
 
         const amountToSell = priceUsdcToWeth.quote(amountToSellValue);
 
-        if (parseFloat(amountToSell.toExact()) < 0.002) {
+        if (BigInt(amountToSell.quotient.toString()) < THRESHOLD_WETH) {
             console.log("   Balance is good enough. Skipping swap.");
             return;
         }
 
-        console.log(`   [Swap] Selling ${amountToSell.toSignificant(6)} WETH for USDC`);
+        console.log(
+            `   [Swap] Selling ${amountToSell.toSignificant(6)} WETH for USDC`
+        );
 
         const tx = await router.exactInputSingle({
             tokenIn: WETH_TOKEN.address,
@@ -167,12 +207,21 @@ export async function mintMaxLiquidity(
     const balUSDC = await getBalance(USDC_TOKEN, wallet);
     const balWETH = await getBalance(WETH_TOKEN, wallet);
 
+    const amount0Input =
+        configuredPool.token0.address === WETH_TOKEN.address
+            ? balWETH
+            : balUSDC;
+    const amount1Input =
+        configuredPool.token1.address === WETH_TOKEN.address
+            ? balWETH
+            : balUSDC;
+
     const position = Position.fromAmounts({
         pool: configuredPool,
         tickLower,
         tickUpper,
-        amount0: balWETH.toString(),
-        amount1: balUSDC.toString(),
+        amount0: amount0Input.toString(),
+        amount1: amount1Input.toString(),
         useFullPrecision: true,
     });
 
@@ -194,24 +243,106 @@ export async function mintMaxLiquidity(
     };
 
     console.log(`\n[Mint] Minting new position...`);
-    const npm = new ethers.Contract(NONFUNGIBLE_POSITION_MANAGER_ADDR, NPM_ABI, wallet);
+    const npm = new ethers.Contract(
+        NONFUNGIBLE_POSITION_MANAGER_ADDR,
+        NPM_ABI,
+        wallet
+    );
     const tx = await npm.mint(mintParams);
     const receipt = await waitWithTimeout(tx, TX_TIMEOUT_MS);
 
-    const event = receipt.logs.find(
-        (log: any) =>
-            log.topics[0] ===
-            ethers.id("Mint(uint256,address,address,uint24,int24,int24,uint128,uint256,uint256)")
-    );
+    const transferEventSig = ethers.id("Transfer(address,address,uint256)");
 
-    if (!event) {
-        throw new Error("Mint successful but failed to parse Token ID from logs.");
+    const transferLog = receipt.logs.find((log: any) => {
+        if (log.topics[0] !== transferEventSig) return false;
+        
+        try {
+            const toAddress = ethers.dataSlice(log.topics[2], 12); // Take last 20 bytes
+            return ethers.getAddress(toAddress) === wallet.address;
+        } catch {
+            return false;
+        }
+    });
+
+    if (!transferLog) {
+        throw new Error(
+            "Mint successful but failed to parse Token ID from logs (Transfer event not found)."
+        );
     }
 
-    const newTokenId = ethers.AbiCoder.defaultAbiCoder()
-        .decode(["uint256"], event.data)[0]
-        .toString();
+    // TokenID is in the 3rd topic (indexed) for ERC721 Transfer
+    const newTokenId = BigInt(transferLog.topics[3]).toString();
 
     console.log(`   Success! Token ID: ${newTokenId}`);
     return newTokenId;
+}
+
+
+// Full Rebalancing Process: Remove Old -> Swap -> Refresh Price -> Mint New
+export async function executeFullRebalance(wallet: ethers.Wallet, configuredPool: Pool, oldTokenId: string) {
+    const npm = new ethers.Contract(NONFUNGIBLE_POSITION_MANAGER_ADDR, NPM_ABI, wallet);
+
+    // 1. Burn old position if exists
+    if (oldTokenId !== "0") {
+        await atomicExitPosition(wallet, oldTokenId);
+    }
+
+    // 2. Rebalance (Swap)
+    await rebalancePortfolio(wallet, configuredPool);
+
+    // ============================================================
+    // Refresh Pool State After Swap
+    // ============================================================
+    console.log("   [System] Refreshing market price and liquidity after swap...");
+    
+    // Explicitly passing V3_FACTORY_ADDR is required for Sepolia
+    const poolAddr = Pool.getAddress(USDC_TOKEN, WETH_TOKEN, POOL_FEE, undefined, V3_FACTORY_ADDR);
+    const poolContract = new ethers.Contract(poolAddr, POOL_ABI, wallet);
+    
+    // Fetch fresh slot0 AND liquidity
+    const [newSlot0, newLiquidity] = await Promise.all([
+        poolContract.slot0(),
+        poolContract.liquidity()
+    ]);
+    
+    const newCurrentTick = Number(newSlot0.tick);
+    
+    // Create a FRESH pool instance for accurate Mint math
+    const freshPool = new Pool(
+        USDC_TOKEN,
+        WETH_TOKEN,
+        POOL_FEE,
+        newSlot0.sqrtPriceX96.toString(),
+        newLiquidity.toString(),
+        newCurrentTick
+    );
+    
+    console.log(`   [Update] Price moved from ${configuredPool.tickCurrent} to ${newCurrentTick}`);
+
+    // 3. Calculate new Tick Range
+    const tickSpace = freshPool.tickSpacing;
+    const WIDTH = 2000; 
+    const MIN_TICK = -887272;
+    const MAX_TICK = 887272;
+
+    let tickLower = Math.floor((newCurrentTick - WIDTH) / tickSpace) * tickSpace;
+    let tickUpper = Math.floor((newCurrentTick + WIDTH) / tickSpace) * tickSpace;
+
+    if (tickLower < MIN_TICK) tickLower = Math.ceil(MIN_TICK / tickSpace) * tickSpace;
+    if (tickUpper > MAX_TICK) tickUpper = Math.floor(MAX_TICK / tickSpace) * tickSpace;
+
+    if (tickLower === tickUpper) tickUpper += tickSpace;
+    if (tickUpper > MAX_TICK) {
+        tickUpper = Math.floor(MAX_TICK / tickSpace) * tickSpace;
+        tickLower = tickUpper - tickSpace;
+    }
+    if (tickLower > tickUpper) [tickLower, tickUpper] = [tickUpper, tickLower];
+
+    console.log(`   New Range: [${tickLower}, ${tickUpper}]`);
+
+    // 4. Mint (Using the FRESH pool instance)
+    const newTokenId = await mintMaxLiquidity(wallet, freshPool, tickLower, tickUpper);
+
+    // 5. Save State
+    saveState(newTokenId);
 }

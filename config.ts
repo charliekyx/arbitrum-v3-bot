@@ -51,9 +51,16 @@ let V3_FACTORY_ADDR_CONF: string;
 let SWAP_ROUTER_ADDR_CONF: string;
 
 if (NETWORK === 'MAINNET') {
+    // https://docs.arbitrum.io/for-devs/dev-tools-and-resources/chain-info
     CHAIN_ID = 42161;
+
+    // https://arbiscan.io/token/0x82af49447d8a07e3bd95bd0d56f35241523fbab1
     WETH_TOKEN_CONF = new Token(CHAIN_ID, safeLower('0x82aF49447D8a07e3bd95BD0d56f35241523fBab1'), 18, 'WETH', 'Wrapped Ether');
+
+    // https://arbiscan.io/token/0xaf88d065e77c8cc2239327c5edb3a432268e5831
     USDC_TOKEN_CONF = new Token(CHAIN_ID, safeLower('0xaf88d065e77c8cC2239327C5EDb3A432268e5831'), 6, 'USDC', 'USD Coin');
+    
+    // https://docs.uniswap.org/contracts/v3/reference/deployments/arbitrum-deployments
     NPM_ADDR_CONF = safeLower("0xC36442b4a4522E871399CD717aBDD847Ab11FE88");
     V3_FACTORY_ADDR_CONF = safeLower("0x1F98431c8aD98523631AE4a59f267346ea31F984");
     SWAP_ROUTER_ADDR_CONF = safeLower("0xE592427A0AEce92De3Edee1F18E0157C05861564");
