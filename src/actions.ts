@@ -140,6 +140,10 @@ export async function rebalancePortfolio(
         wallet
     );
 
+   
+    console.log(`[Debug] USDC amount: ${usdcAmount}`);
+    console.log(`[Debug] WETH amount: ${wethAmount}`);
+
     // 5 USDC (6 decimals) = 5,000,000
     const THRESHOLD_USDC = 5_000_000n;
     // 0.002 WETH (18 decimals) = 2,000,000,000,000,000
@@ -383,13 +387,13 @@ export async function executeFullRebalance(
     console.log(`   New Range: [${tickLower}, ${tickUpper}]`);
 
     // 4. Mint (Using the FRESH pool instance)
-    const newTokenId = await mintMaxLiquidity(
-        wallet,
-        freshPool,
-        tickLower,
-        tickUpper
-    );
+    // const newTokenId = await mintMaxLiquidity(
+    //     wallet,
+    //     freshPool,
+    //     tickLower,
+    //     tickUpper
+    // );
 
-    // 5. Save State
-    saveState(newTokenId);
+    // // 5. Save State
+    // saveState(newTokenId);
 }
