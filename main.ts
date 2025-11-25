@@ -63,6 +63,9 @@ async function runLifeCycle() {
     );
     const currentTick = Number(slot0.tick);
 
+    console.log(`[Debug] Pool Address: ${poolAddr}`);
+    console.log(`[Debug] Tick Spacing: ${configuredPool.tickSpacing}`);
+
     const price =
         configuredPool.token0.address === WETH_TOKEN.address
             ? configuredPool.token0Price.toSignificant(6)
