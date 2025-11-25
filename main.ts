@@ -98,15 +98,20 @@ async function runLifeCycle() {
         const tu = Number(pos.tickUpper);
 
         if (currentTick < tl || currentTick > tu) {
-            if (currentTick < tl || currentTick > tu) {
-                console.log(
-                    `   [Action] Out of Range! (${tl} < ${currentTick} < ${tu})`
-                );
-                // Trigger the full atomic rebalance workflow
-                await executeFullRebalance(wallet, configuredPool, tokenId);
-            } else {
-                console.log(`   [Status] In Range.`);
-            }
+            console.log(
+                `   [Action] Out of Range! (${tl} < ${currentTick} < ${tu})`
+            );
+            console.log(`   >>> Triggering Rebalance Process <<<`);
+            await executeFullRebalance(wallet, configuredPool, tokenId);
+        } else {
+            // 现在这个 else 可以正常运行了
+            console.log(
+                `   [Status] In Range. (${tl} < ${currentTick} < ${tu})`
+            );
+            
+            const fees0 = ethers.formatUnits(pos.tokensOwed0, 18);
+            const fees1 = ethers.formatUnits(pos.tokensOwed1, 6);
+            console.log(`   Unclaimed Fees: ${fees0} WETH / ${fees1} USDC`);
         }
     } catch (e) {
         console.error(`   [Error] Cycle failed:`, e);
