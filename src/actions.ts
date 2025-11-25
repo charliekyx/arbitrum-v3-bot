@@ -141,8 +141,9 @@ export async function rebalancePortfolio(
     );
 
    
-    console.log(`[Debug] USDC amount: ${usdcAmount}`);
-    console.log(`[Debug] WETH amount: ${wethAmount}`);
+    console.log(`[Debug] USDC amount: ${usdcAmount.toSignificant(6)}`);
+    console.log(`[Debug] WETH amount: ${wethAmount.toSignificant(18)}`);
+    console.log(`[Debug] wethValueInUsdc amount: ${wethValueInUsdc.toSignificant(6)}`);
 
     // 5 USDC (6 decimals) = 5,000,000
     const THRESHOLD_USDC = 5_000_000n;
