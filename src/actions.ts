@@ -38,10 +38,12 @@ export async function approveAll(wallet: ethers.Wallet) {
             const allowance = await withRetry(() =>
                 contract.allowance(wallet.address, spender)
             );
-            const threshold = ethers.MaxUint256 / 2n; 
-            
+            const threshold = ethers.MaxUint256 / 2n;
+
             if (allowance < threshold) {
-                console.log(`[Approve] Authorizing ${token.symbol} for ${spender}...`);
+                console.log(
+                    `[Approve] Authorizing ${token.symbol} for ${spender}...`
+                );
                 const tx = await contract.approve(spender, ethers.MaxUint256);
                 await waitWithTimeout(tx, TX_TIMEOUT_MS);
                 console.log(`[Approve] Success.`);
@@ -108,6 +110,10 @@ export async function rebalancePortfolio(
     wallet: ethers.Wallet,
     configuredPool: Pool
 ) {
+    console.log(`[Debug] Checking balances for wallet: ${wallet.address}`);
+    console.log(`[Debug] USDC Contract: ${USDC_TOKEN.address}`);
+    console.log(`[Debug] WETH Contract: ${WETH_TOKEN.address}`);
+
     console.log(`\n[Rebalance] Calculating Optimal Swap...`);
 
     const balUSDC = await getBalance(USDC_TOKEN, wallet);
@@ -220,7 +226,7 @@ export async function mintMaxLiquidity(
     // BigInt math: amount * 999 / 1000
     // to ensure there is always a tiny bit more tokens in the wallet than the contract asks for.
     // This prevents "Insufficient Balance" reverts caused by tiny math discrepancies between the SDK and the Smart Contract.
-    
+
     // Temporary debugging: Use only 50% of balance to rule out "Insufficient Funds" completely
     const amount0Safe = (amount0Input * 999n) / 1000n;
     const amount1Safe = (amount1Input * 999n) / 1000n;
@@ -234,13 +240,13 @@ export async function mintMaxLiquidity(
         useFullPrecision: true,
     });
 
-   // This prevents Reverts (good for bot uptime) while stopping total disasters (good for wallet)
+    // This prevents Reverts (good for bot uptime) while stopping total disasters (good for wallet)
     const SLIPPAGE_TOLERANCE_WIDE = new Percent(300, 10_000); // 3%
 
-    const { amount0: amount0Min, amount1: amount1Min } = position.mintAmountsWithSlippage(SLIPPAGE_TOLERANCE_WIDE);
+    const { amount0: amount0Min, amount1: amount1Min } =
+        position.mintAmountsWithSlippage(SLIPPAGE_TOLERANCE_WIDE);
 
-
-   const mintParams = {
+    const mintParams = {
         token0: configuredPool.token0.address,
         token1: configuredPool.token1.address,
         fee: POOL_FEE,
@@ -248,11 +254,11 @@ export async function mintMaxLiquidity(
         tickUpper,
         amount0Desired: position.mintAmounts.amount0.toString(),
         amount1Desired: position.mintAmounts.amount1.toString(),
-        
+
         // todo: 强制改为 "0" for now!!!!!!! need to fine-tune
-        amount0Min: "0", 
+        amount0Min: "0",
         amount1Min: "0",
-        
+
         recipient: wallet.address,
         deadline: Math.floor(Date.now() / 1000) + 120,
     };
