@@ -388,13 +388,13 @@ export async function executeFullRebalance(
     console.log(`   New Range: [${tickLower}, ${tickUpper}]`);
 
     // 4. Mint (Using the FRESH pool instance)
-    // const newTokenId = await mintMaxLiquidity(
-    //     wallet,
-    //     freshPool,
-    //     tickLower,
-    //     tickUpper
-    // );
+    const newTokenId = await mintMaxLiquidity(
+        wallet,
+        freshPool,
+        tickLower,
+        tickUpper
+    );
 
-    // // 5. Save State
-    // saveState(newTokenId);
+    // 5. Save State
+    saveState(newTokenId);
 }
