@@ -15,9 +15,12 @@ import {
     TX_TIMEOUT_MS,
     POOL_ABI,
     V3_FACTORY_ADDR,
+    RSI_OVERBOUGHT,
+    RSI_OVERSOLD,
 } from "../config";
 import { withRetry, waitWithTimeout } from "./utils";
 import { saveState } from "./state";
+import { getEthRsi } from "./analytics";
 
 // --- Wallet Utilities ---
 export async function getBalance(
@@ -114,7 +117,11 @@ export async function rebalancePortfolio(
     console.log(`[Debug] USDC Contract: ${USDC_TOKEN.address}`);
     console.log(`[Debug] WETH Contract: ${WETH_TOKEN.address}`);
 
-    console.log(`\n[Rebalance] Calculating Optimal Swap...`);
+    console.log(`\n[Rebalance] Calculating Optimal Swap with RSI Filter...`);
+
+    // 1. Get RSI Data
+    const currentRsi = await getEthRsi("1h");
+    console.log(`   [Market] Current ETH 1h RSI: ${currentRsi.toFixed(2)}`);
 
     const balUSDC = await getBalance(USDC_TOKEN, wallet);
     const balWETH = await getBalance(WETH_TOKEN, wallet);
@@ -152,6 +159,14 @@ export async function rebalancePortfolio(
     const THRESHOLD_WETH = 2_000_000_000_000_000n;
 
     if (usdcAmount.greaterThan(wethValueInUsdc)) {
+        // RSI Check: If RSI > 70 (Overbought), Buying ETH is risky (buying the top).
+        if (currentRsi > RSI_OVERBOUGHT) {
+            console.log(
+                `   [RSI ALERT] Market is Overbought (RSI > ${RSI_OVERBOUGHT}). Skipping BUY ETH to prevent buying the top.`
+            );
+            return;
+        }
+
         // Sell USDC
         const diff = usdcAmount.subtract(wethValueInUsdc);
         const amountToSell = diff.divide(2);
@@ -176,6 +191,13 @@ export async function rebalancePortfolio(
         });
         await waitWithTimeout(tx, TX_TIMEOUT_MS);
     } else {
+        // RSI Check: If RSI < 30 (Oversold), Selling ETH is risky (selling the bottom).
+        if (currentRsi < RSI_OVERSOLD) {
+            console.log(
+                `   [RSI ALERT] Market is Oversold (RSI < ${RSI_OVERSOLD}). Skipping SELL ETH to prevent panic selling.`
+            );
+            return;
+        }
         // Sell WETH
         const diffValueInUsdc = wethValueInUsdc.subtract(usdcAmount);
         const amountToSellValue = diffValueInUsdc.divide(2);
@@ -264,7 +286,7 @@ export async function mintMaxLiquidity(
         recipient: wallet.address,
         deadline: Math.floor(Date.now() / 1000) + 120,
     };
-    
+
     console.log(`\n[Mint] Minting new position...`);
     const npm = new ethers.Contract(
         NONFUNGIBLE_POSITION_MANAGER_ADDR,

@@ -5,10 +5,12 @@
     "dependencies": {
         "@uniswap/sdk-core": "^4.0.0",
         "@uniswap/v3-sdk": "^3.9.0",
+        "axios": "^1.13.2",
         "dotenv": "^16.0.0",
         "ethers": "^6.0.0",
         "jsbi": "3.2.5",
-        "nodemailer": "^7.0.10"
+        "nodemailer": "^7.0.10",
+        "technicalindicators": "^3.1.0"
     },
     "devDependencies": {
         "@types/node": "^20.0.0",

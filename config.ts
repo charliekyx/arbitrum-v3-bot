@@ -13,6 +13,12 @@ export const SLIPPAGE_TOLERANCE = new Percent(50, 10_000);
 export const MAX_UINT128 = (1n << 128n) - 1n;
 export const POOL_FEE = FeeAmount.MEDIUM; 
 
+// --- RSI Thresholds ---
+// If RSI > 70, market is Overbought (Don't Buy ETH)
+// If RSI < 30, market is Oversold (Don't Sell ETH)
+export const RSI_OVERBOUGHT = 70;
+export const RSI_OVERSOLD = 30;
+
 // --- ABIs ---
 export const ERC20_ABI = [
     "function balanceOf(address owner) view returns (uint256)",
