@@ -92,8 +92,30 @@ async function onNewBlock(blockNumber: number) {
     // 1. Load State (Fast, usually local Redis/File)
     const { tokenId } = await loadState();
 
-    // If no active strategy, nothing to check
-    if (!tokenId) return;
+    if (!tokenId || tokenId === "0") {
+        console.log(
+            `[Block ${blockNumber}] No active position. Initializing Strategy...`
+        );
+
+        const [slot0, liquidity] = await Promise.all([
+            poolContract.slot0(),
+            poolContract.liquidity(),
+        ]);
+
+        const configuredPool = new Pool(
+            USDC_TOKEN,
+            WETH_TOKEN,
+            POOL_FEE,
+            slot0.sqrtPriceX96.toString(),
+            liquidity.toString(),
+            Number(slot0.tick)
+        );
+
+        await executeFullRebalance(wallet, configuredPool, "0");
+        
+        lastHedgeTime = 0;
+        return;
+    }
 
     // ============================================================
     // CRITICAL PATH: SAFETY CHECK (Every Block, No Throttle)
