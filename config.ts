@@ -108,7 +108,7 @@ if (NETWORK === "MAINNET") {
     );
     // Aave Variable Debt WETH Token (Arbitrum)
     WETH_DEBT_TOKEN_ADDR_CONF = safeLower(
-        "0xf611aEb5013fD2c0511c9CD55c7dc5C1140741A6"
+        "0x0c84331e39d6658Cd6e6b9ba04736cC4c4734351"
     );
 } else {
     // Sepolia
