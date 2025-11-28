@@ -473,8 +473,8 @@ export async function closeLpPosition(wallet: ethers.Wallet, tokenId: string) {
     const collectParams = {
         tokenId: tokenId,
         recipient: wallet.address,
-        amount0Max: ethers.MaxUint256,
-        amount1Max: ethers.MaxUint256,
+        amount0Max: MAX_UINT128,
+        amount1Max: MAX_UINT128,
     };
     const txCollect = await npm.collect(collectParams);
     await waitWithTimeout(txCollect, 30000);

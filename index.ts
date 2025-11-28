@@ -1,4 +1,4 @@
-import { ethers } from "ethers";
+import { ethers, NonceManager } from "ethers";
 import { Pool, Position } from "@uniswap/v3-sdk";
 
 import * as dotenv from "dotenv";
@@ -45,8 +45,11 @@ async function initialize() {
     });
 
     provider = robustProvider.getProvider();
-    wallet = new ethers.Wallet(process.env.PRIVATE_KEY!, provider);
+    const baseWallet = new ethers.Wallet(process.env.PRIVATE_KEY!, provider);
+    wallet = new NonceManager(baseWallet) as any; // Cast as any to avoid type complaints if strictly typed
 
+    console.log(`[System] Wallet initialized with NonceManager: ${await wallet.getAddress()}`);
+    
     const poolAddr = Pool.getAddress(
         USDC_TOKEN,
         WETH_TOKEN,
@@ -112,7 +115,7 @@ async function onNewBlock(blockNumber: number) {
         );
 
         await executeFullRebalance(wallet, configuredPool, "0");
-        
+
         lastHedgeTime = 0;
         return;
     }
