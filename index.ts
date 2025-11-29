@@ -38,6 +38,12 @@ let isProcessing = false; // Lock to prevent overlapping executions
 
 let lastHedgeTime = 0; // State for throttling
 
+
+let lastRunTime = 0;
+// 强制最小间隔 (毫秒)
+// 3000 = 3秒。对于 500 SGD 的资金量，3秒检查一次非常足够了。
+const MIN_INTERVAL_MS = 3000;
+
 async function initialize() {
     const rpcUrl = process.env.RPC_URL || "";
 
@@ -89,10 +95,17 @@ async function setupEventListeners() {
     console.log("[System] Listening for blocks...");
 
     provider.on("block", async (blockNumber) => {
+        const now = Date.now();
+        if (now - lastRunTime < MIN_INTERVAL_MS) {
+            return; 
+        }
+
+
         if (isProcessing) return;
         isProcessing = true;
 
         try {
+            lastRunTime = now; // 更新运行时间
             await onNewBlock(blockNumber);
         } catch (e) {
             console.error(`[Block ${blockNumber}] Error:`, e);
