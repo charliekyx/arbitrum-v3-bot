@@ -27,7 +27,7 @@ import {
     QUOTER_ABI,
 } from "../config";
 
-import { withRetry, waitWithTimeout, getPoolTwap } from "./utils";
+import { withRetry, waitWithTimeout, getPoolTwap, sendEmailAlert } from "./utils";
 import { saveState } from "./state";
 import { getEthAtr, getEthRsi } from "./analytics";
 
@@ -360,10 +360,13 @@ export async function executeFullRebalance(
         console.log(`   [Safety] Spot Tick: ${currentTick} | TWAP Tick: ${twapTick} | Diff: ${tickDiff}`);
 
         if (tickDiff > MAX_TICK_DEVIATION) {
+            const msg = `Price manipulation detected! Spot price deviates from TWAP by ${tickDiff} ticks.`;
+            await sendEmailAlert("TWAP Check Failed", msg);
             throw new Error(`Price manipulation detected! Spot price deviates from TWAP by ${tickDiff} ticks.`);
         }
     } catch (e) {
         console.error("   [Safety] TWAP check failed:", e);
+        await sendEmailAlert("TWAP Check Error", `Error checking TWAP: ${e}`);
         throw e; // Must throw exception to stop further operations
     }
 
@@ -387,7 +390,13 @@ export async function executeFullRebalance(
     }
 
     // 2. Swap to align portfolio ratio
-    await rebalancePortfolio(wallet, configuredPool);
+    try {
+        await rebalancePortfolio(wallet, configuredPool);
+    } catch (e) {
+        console.error("   [Rebalance] Swap failed:", e);
+        await sendEmailAlert("Rebalance Swap Failed", `Swap likely reverted due to Slippage or Gas: ${e}`);
+        throw e; 
+    }
 
     console.log("   [System] Refreshing market data...");
 
