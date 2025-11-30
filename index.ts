@@ -35,24 +35,46 @@ let lastHedgeTime = 0;
 // Safe Mode Flag
 let isSafeMode = false;
 
+// Last run timestamp for block listener throttling
 let lastRunTime = 0;
 const MIN_INTERVAL_MS = 3000;
 
 async function initialize() {
-    const rpcUrl = process.env.RPC_URL || "";
+    const rpcEnv = process.env.RPC_URL || "";
+    const rpcUrls = rpcEnv.split(',').map(u => u.trim()).filter(u => u.length > 0);
 
-    robustProvider = new RobustProvider(rpcUrl, async () => {
-        console.log("[System] Reconnected. Re-binding events...");
+    if (rpcUrls.length === 0) {
+        throw new Error("RPC_URL is not set in .env");
+    }
+
+    console.log(`[System] Loaded ${rpcUrls.length} RPC nodes.`);
+
+    // Initialize Robust WebSocket Provider with Fallback
+    robustProvider = new RobustProvider(rpcUrls, async () => {
+        console.log("[System] Provider switched/reconnected. Re-binding events...");
+        
+        // [Important] Must update global provider reference after switching Provider
+        provider = robustProvider.getProvider();
+        
+        // [Important] Wallet also needs to reconnect to the new Provider, otherwise transactions will fail with Network Error
+        // Note: Since wallet is a global variable, we need to update its provider
+        wallet = wallet.connect(provider) as any; 
+        
+        // Re-bind contract Provider
+        poolContract = poolContract.connect(provider) as ethers.Contract;
+        // npm and aaveManager use the wallet internally; they will update automatically as long as the wallet updates its provider
+        
         await setupEventListeners();
     });
 
     provider = robustProvider.getProvider();
-    const baseWallet = new ethers.Wallet(process.env.PRIVATE_KEY!, provider);
     
+    // [Note] When initializing wallet here
+    const baseWallet = new ethers.Wallet(process.env.PRIVATE_KEY!, provider);
     const managedWallet = new NonceManager(baseWallet);
     (managedWallet as any).address = baseWallet.address;
-
     wallet = managedWallet as any;
+
     console.log(`[System] Wallet initialized: ${await wallet.getAddress()}`);
     
     const poolAddr = Pool.getAddress(USDC_TOKEN, WETH_TOKEN, POOL_FEE, undefined, V3_FACTORY_ADDR);
@@ -140,7 +162,7 @@ async function onNewBlock(blockNumber: number) {
     // ============================================================
     // CRITICAL PATH: SAFETY CHECK
     // ============================================================
-    //  If check returns false, enter Safe Mode
+    // If check returns false, enter Safe Mode
     const isSafe = await aave.checkHealthAndPanic(tokenId);
 
     if (!isSafe) {
