@@ -340,7 +340,7 @@ export async function executeFullRebalance(
 ) {
     console.log(`[Rebalance] Starting full rebalance sequence...`);
 
-    // 0. [Critical Fix] TWAP Price Safety Check
+    // 0. TWAP Price Safety Check
     // Prevents price manipulation via flash loans from triggering a rebalance at a bad price.
     const poolAddr = Pool.getAddress(USDC_TOKEN, WETH_TOKEN, POOL_FEE, undefined, V3_FACTORY_ADDR);
     const poolContract = new ethers.Contract(poolAddr, POOL_ABI, wallet);
@@ -365,6 +365,20 @@ export async function executeFullRebalance(
     } catch (e) {
         console.error("   [Safety] TWAP check failed:", e);
         throw e; // Must throw exception to stop further operations
+    }
+
+    
+    console.log("   [Strategy] Pre-fetching market analytics...");
+    let atr, rsi;
+    try {
+        [atr, rsi] = await Promise.all([
+            getEthAtr("1h"),
+            getEthRsi("1h")
+        ]);
+        console.log(`   [Strategy] Data acquired. ATR: ${atr}, RSI: ${rsi}`);
+    } catch (e) {
+        console.error("   [Strategy] Failed to fetch market data. Aborting rebalance to keep old position safe.");
+        throw e; // keep old position
     }
 
     // 1. Exit Old Position
@@ -401,8 +415,6 @@ export async function executeFullRebalance(
     // DYNAMIC RANGE CALCULATION (ATR + RSI SKEW)
     // ============================================================
 
-    const atr = await getEthAtr("1h"); 
-
     const priceStr =
         freshPool.token0.address === WETH_TOKEN.address
             ? freshPool.token0Price.toSignificant(6)
@@ -425,8 +437,6 @@ export async function executeFullRebalance(
     const MIN_TICK = -887272;
     const MAX_TICK = 887272;
 
-    const rsi = await getEthRsi("1h");
-    console.log(`   [Strategy] RSI Check: ${rsi.toFixed(2)}`);
 
     let skew = 0.5;
 
