@@ -207,6 +207,10 @@ export class AaveManager {
             `   [Hedge] CLOSE SHORT: Repaying ${ethers.formatUnits(amountEth, 18)} ETH...`
         );
 
+        if (force) {
+            console.warn("   [Hedge] FORCE MODE: Increasing slippage tolerance to 5% to ensure execution.");
+        }
+
         const wethContract = new ethers.Contract(
             WETH_TOKEN.address,
             ERC20_ABI,
@@ -239,9 +243,15 @@ export class AaveManager {
                 const [quotedIn] = await this.quoter.getFunction("quoteExactOutputSingle").staticCall(quoteParams);
                 
                 // Calculate Slippage: Max In = Quoted * (1 + tolerance)
-                const tolerance = BigInt(SLIPPAGE_TOLERANCE.numerator.toString());
-                const basis = BigInt(SLIPPAGE_TOLERANCE.denominator.toString());
-                amountInMax = quotedIn * (basis + tolerance) / basis;
+              let toleranceNumerator: bigint;  
+                if (force) {
+                    toleranceNumerator = 500n; // Force: 5%
+                } else {
+                    toleranceNumerator = BigInt(SLIPPAGE_TOLERANCE.numerator.toString()); // Normal: 0.5%
+                }
+                
+                const basis = 10000n;
+                amountInMax = quotedIn * (basis + toleranceNumerator) / basis;
 
                 console.log(`   [Quote] Need ~${ethers.formatUnits(quotedIn, 6)} USDC to buy deficit ETH.`);
 
@@ -270,9 +280,15 @@ export class AaveManager {
                         sqrtPriceLimitX96: 0
                     };
                     const [qOut] = await this.quoter.getFunction("quoteExactInputSingle").staticCall(quoteInParams);
-                    const tolerance = BigInt(SLIPPAGE_TOLERANCE.numerator.toString());
-                    const basis = BigInt(SLIPPAGE_TOLERANCE.denominator.toString());
-                    const minOut = qOut * (basis - tolerance) / basis;
+                   let toleranceNumerator: bigint;
+                    if (force) {
+                        toleranceNumerator = 500n; // 5%
+                    } else {
+                        toleranceNumerator = BigInt(SLIPPAGE_TOLERANCE.numerator.toString()); // 0.5%
+                    }
+                    
+                    const basis = 10000n;
+                    const minOut = qOut * (basis - toleranceNumerator) / basis;
 
                     txSwap = await this.swapRouter.exactInputSingle({
                         tokenIn: USDC_TOKEN.address,
