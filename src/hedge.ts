@@ -19,7 +19,7 @@ import {
     SLIPPAGE_TOLERANCE,
 } from "../config";
 
-import { withRetry, waitWithTimeout, sendEmailAlert } from "./utils";
+import { withRetry, waitWithTimeout, sendEmailAlert, getPoolTwap } from "./utils";
 import { saveState } from "./state";
 import { atomicExitPosition } from "./actions";
 
@@ -72,27 +72,57 @@ export class AaveManager {
 
     // --- Safety Checks ---
 
+
     /**
-     * Lightweight check to be called on every block.
-     * Returns true if safe, false if panic exit triggered.
+     * Checks health factor. If low, verifies price integrity before panicking.
+     * @param lpTokenId Token ID of the position
+     * @param uniPoolContract Uniswap V3 Pool Contract (for TWAP check)
      */
-    async checkHealthAndPanic(lpTokenId: string): Promise<boolean> {
+    async checkHealthAndPanic(lpTokenId: string, uniPoolContract: ethers.Contract): Promise<boolean> {
         try {
             const hf = await this.getHealthFactor();
 
-            // CRITICAL RISK CHECK
-            if (hf < AAVE_MIN_HEALTH_FACTOR) {
-                console.warn(
-                    `[Risk] Health Factor Critical: ${hf.toFixed(4)} < ${AAVE_MIN_HEALTH_FACTOR}`
-                );
+            // Thresholds
+            const HF_WARNING = AAVE_MIN_HEALTH_FACTOR; // e.g., 1.5
+            const HF_CRITICAL = 1.1; // Absolute liquidation danger zone
+
+            if (hf < HF_WARNING) {
+                console.warn(`[Risk] Health Factor Low: ${hf.toFixed(4)} < ${HF_WARNING}`);
+
+                // 1. Check for Price Manipulation (Flash Increase)
+                // If HF is low BUT not yet critical (1.1 < HF < 1.5), we check if this is a temporary spike.
+                if (hf > HF_CRITICAL) {
+                    try {
+                        const twapTick = Number(await getPoolTwap(uniPoolContract, 300)); // 5 min TWAP
+                        const slot0 = await uniPoolContract.slot0();
+                        const currentTick = Number(slot0.tick);
+                        const tickDiff = Math.abs(currentTick - twapTick);
+                        
+                        // 2% deviation threshold (~200 ticks)
+                        if (tickDiff > 200) {
+                            console.warn(`[Hedge] Price deviation detected (${tickDiff} ticks). Possible Flash Manipulation.`);
+                            console.warn(`[Hedge] HF (${hf.toFixed(2)}) is above Critical (${HF_CRITICAL}). SUPPRESSING PANIC.`);
+                            await sendEmailAlert("Hedge Warning", `HF Low (${hf}) but Price Deviated. Holding position to avoid buying top.`);
+                            
+                            // Return true (Pretend safe) to avoid locking the bot in Safe Mode, 
+                            // allowing it to check again in the next block.
+                            return true; 
+                        }
+                    } catch (e) {
+                        console.error("[Hedge] Failed to check TWAP during risk assessment:", e);
+                        // If check fails, default to safety -> proceed to panic logic below
+                    }
+                }
+
+                // 2. If HF is Critical OR Price is consistent (Real crash) -> PANIC
+                console.warn(`[Risk] Executing PANIC EXIT. (HF: ${hf.toFixed(4)})`);
                 await this.panicExitAll(lpTokenId);
-                return false;
+                return false; // Signal Safe Mode
             }
 
             return true;
         } catch (e) {
             console.error("[Aave] Health check failed:", e);
-            // Assume safe on RPC error to prevent premature panic, but log it.
             return true;
         }
     }
@@ -336,7 +366,6 @@ export class AaveManager {
         }
 
         console.log(`[EXIT] Panic Cleanup Complete. Entering SAFE MODE.`);
-        // [Removed] process.exit(1);
     }
 
     async adjustHedge(lpEthAmount: bigint, lpTokenId: string) {

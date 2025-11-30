@@ -163,7 +163,7 @@ async function onNewBlock(blockNumber: number) {
     // CRITICAL PATH: SAFETY CHECK
     // ============================================================
     // If check returns false, enter Safe Mode
-    const isSafe = await aave.checkHealthAndPanic(tokenId);
+    const isSafe = await aave.checkHealthAndPanic(tokenId, poolContract);
 
     if (!isSafe) {
         console.error("[System] Panic exit triggered. Entering SAFE MODE.");
