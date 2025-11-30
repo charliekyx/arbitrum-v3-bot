@@ -23,9 +23,11 @@ import {
     REBALANCE_THRESHOLD_USDC,
     REBALANCE_THRESHOLD_WETH,
     ATR_SAFETY_FACTOR,
+    QUOTER_ADDR,
+    QUOTER_ABI,
 } from "../config";
 
-import { withRetry, waitWithTimeout } from "./utils";
+import { withRetry, waitWithTimeout, getPoolTwap } from "./utils";
 import { saveState } from "./state";
 import { getEthAtr, getEthRsi } from "./analytics";
 
@@ -150,6 +152,15 @@ export async function rebalancePortfolio(
         wallet
     );
 
+    const quoter = new ethers.Contract(QUOTER_ADDR, QUOTER_ABI, wallet);
+
+    // Slippage Helper
+    const calculateMinOut = (quotedAmount: bigint) => {
+        const tolerance = BigInt(SLIPPAGE_TOLERANCE.numerator.toString());
+        const basis = BigInt(SLIPPAGE_TOLERANCE.denominator.toString());
+        return quotedAmount * (basis - tolerance) / basis;
+    };
+
     if (usdcAmount.greaterThan(wethValueInUsdc)) {
         // Sell USDC
         const diff = usdcAmount.subtract(wethValueInUsdc);
@@ -159,20 +170,35 @@ export async function rebalancePortfolio(
             console.log("   Balance is good enough. Skipping swap.");
             return;
         }
-        console.log(
-            `   [Swap] Selling ${amountToSell.toSignificant(6)} USDC for WETH`
-        );
+    
+        const amountIn = BigInt(amountToSell.quotient.toString());
+        console.log(`   [Swap] Selling ${amountToSell.toSignificant(6)} USDC for WETH`);
 
-        const tx = await router.exactInputSingle({
+        // 1. Quote
+        const quoteParams = {
+            tokenIn: USDC_TOKEN.address,
+            tokenOut: WETH_TOKEN.address,
+            amountIn: amountIn,
+            fee: POOL_FEE,
+            sqrtPriceLimitX96: 0
+        };
+        // QuoterV2 returns struct, ethers v6 parses it. First return value is amountOut.
+        const [quotedAmountOut] = await quoter.getFunction("quoteExactInputSingle").staticCall(quoteParams);
+        const amountOutMin = calculateMinOut(quotedAmountOut);
+
+        console.log(`   [Quote] Expect: ${ethers.formatEther(quotedAmountOut)} ETH, Min: ${ethers.formatEther(amountOutMin)}`);
+
+       const tx = await router.exactInputSingle({
             tokenIn: USDC_TOKEN.address,
             tokenOut: WETH_TOKEN.address,
             fee: POOL_FEE,
             recipient: wallet.address,
             deadline: Math.floor(Date.now() / 1000) + 120,
-            amountIn: amountToSell.quotient.toString(),
-            amountOutMinimum: 0,
+            amountIn: amountIn,
+            amountOutMinimum: amountOutMin,
             sqrtPriceLimitX96: 0,
         });
+
         await waitWithTimeout(tx, TX_TIMEOUT_MS);
     } else {
         // Sell WETH
@@ -191,9 +217,21 @@ export async function rebalancePortfolio(
             return;
         }
 
-        console.log(
-            `   [Swap] Selling ${amountToSell.toSignificant(6)} WETH for USDC`
-        );
+       const amountIn = BigInt(amountToSell.quotient.toString());
+        console.log(`   [Swap] Selling ${amountToSell.toSignificant(6)} WETH for USDC`);
+
+        // 1. Quote
+        const quoteParams = {
+            tokenIn: WETH_TOKEN.address,
+            tokenOut: USDC_TOKEN.address,
+            amountIn: amountIn,
+            fee: POOL_FEE,
+            sqrtPriceLimitX96: 0
+        };
+        const [quotedAmountOut] = await quoter.getFunction("quoteExactInputSingle").staticCall(quoteParams);
+        const amountOutMin = calculateMinOut(quotedAmountOut);
+
+        console.log(`   [Quote] Expect: ${ethers.formatUnits(quotedAmountOut, 6)} USDC, Min: ${ethers.formatUnits(amountOutMin, 6)}`);
 
         const tx = await router.exactInputSingle({
             tokenIn: WETH_TOKEN.address,
@@ -201,10 +239,11 @@ export async function rebalancePortfolio(
             fee: POOL_FEE,
             recipient: wallet.address,
             deadline: Math.floor(Date.now() / 1000) + 120,
-            amountIn: amountToSell.quotient.toString(),
-            amountOutMinimum: 0,
+            amountIn: amountIn,
+            amountOutMinimum: amountOutMin,
             sqrtPriceLimitX96: 0,
         });
+
         await waitWithTimeout(tx, TX_TIMEOUT_MS);
     }
 }
@@ -227,12 +266,7 @@ export async function mintMaxLiquidity(
             ? balWETH
             : balUSDC;
 
-    // Calculate 99.9% of balance to avoid rounding errors causing reverts
-    // BigInt math: amount * 999 / 1000
-    // to ensure there is always a tiny bit more tokens in the wallet than the contract asks for.
-    // This prevents "Insufficient Balance" reverts caused by tiny math discrepancies between the SDK and the Smart Contract.
-
-    // Temporary debugging: Use only 50% of balance to rule out "Insufficient Funds" completely
+    // 99.9% Buffer
     const amount0Safe = (amount0Input * 999n) / 1000n;
     const amount1Safe = (amount1Input * 999n) / 1000n;
 
@@ -279,7 +313,7 @@ export async function mintMaxLiquidity(
         if (log.topics[0] !== transferEventSig) return false;
 
         try {
-            const toAddress = ethers.dataSlice(log.topics[2], 12); // Take last 20 bytes
+            const toAddress = ethers.dataSlice(log.topics[2], 12); 
             return ethers.getAddress(toAddress) === wallet.address;
         } catch {
             return false;
@@ -292,7 +326,6 @@ export async function mintMaxLiquidity(
         );
     }
 
-    // TokenID is in the 3rd topic (indexed) for ERC721 Transfer
     const newTokenId = BigInt(transferLog.topics[3]).toString();
 
     console.log(`   Success! Token ID: ${newTokenId}`);
@@ -307,6 +340,33 @@ export async function executeFullRebalance(
 ) {
     console.log(`[Rebalance] Starting full rebalance sequence...`);
 
+    // 0. [Critical Fix] TWAP Price Safety Check
+    // Prevents price manipulation via flash loans from triggering a rebalance at a bad price.
+    const poolAddr = Pool.getAddress(USDC_TOKEN, WETH_TOKEN, POOL_FEE, undefined, V3_FACTORY_ADDR);
+    const poolContract = new ethers.Contract(poolAddr, POOL_ABI, wallet);
+
+    try {
+        // Get TWAP Tick for the last 5 minutes (300 seconds)
+        const twapTick = Number(await getPoolTwap(poolContract, 300));
+        const currentTick = configuredPool.tickCurrent;
+        
+        // Calculate tick difference
+        const tickDiff = Math.abs(currentTick - twapTick);
+        
+        // 1% price deviation is roughly 100 ticks (Basis Points)
+        // Threshold: If Spot deviates from TWAP by more than 200 ticks (~2%), reject the trade.
+        const MAX_TICK_DEVIATION = 200; 
+
+        console.log(`   [Safety] Spot Tick: ${currentTick} | TWAP Tick: ${twapTick} | Diff: ${tickDiff}`);
+
+        if (tickDiff > MAX_TICK_DEVIATION) {
+            throw new Error(`Price manipulation detected! Spot price deviates from TWAP by ${tickDiff} ticks.`);
+        }
+    } catch (e) {
+        console.error("   [Safety] TWAP check failed:", e);
+        throw e; // Must throw exception to stop further operations
+    }
+
     // 1. Exit Old Position
     if (oldTokenId !== "0") {
         await atomicExitPosition(wallet, oldTokenId);
@@ -318,15 +378,7 @@ export async function executeFullRebalance(
     console.log("   [System] Refreshing market data...");
 
     // 3. Refresh Data (Fetch latest Price/Liquidity)
-    const poolAddr = Pool.getAddress(
-        USDC_TOKEN,
-        WETH_TOKEN,
-        POOL_FEE,
-        undefined,
-        V3_FACTORY_ADDR
-    );
-    const poolContract = new ethers.Contract(poolAddr, POOL_ABI, wallet);
-
+    // Need to re-fetch data because the swap above changed the pool state
     const [newSlot0, newLiquidity] = await Promise.all([
         poolContract.slot0(),
         poolContract.liquidity(),
@@ -349,69 +401,45 @@ export async function executeFullRebalance(
     // DYNAMIC RANGE CALCULATION (ATR + RSI SKEW)
     // ============================================================
 
-    // A. Get ATR (Volatility)
-    const atr = await getEthAtr("1h"); // e.g., 45 USD
+    const atr = await getEthAtr("1h"); 
 
-    // B. Convert ATR to Ticks
-    // Rule of thumb: 1% Price Move ~= 100 Ticks
-    // Price is approx `configuredPool.token0Price` (if WETH is T0) or inverse
     const priceStr =
         freshPool.token0.address === WETH_TOKEN.address
             ? freshPool.token0Price.toSignificant(6)
             : freshPool.token1Price.toSignificant(6);
     const currentPrice = parseFloat(priceStr);
 
-    // Volatility Percentage = ATR / Price
-    // Example: 50 / 3000 = 1.6%
     const volPercent = (atr / currentPrice) * 100;
 
-    // Dynamic Width = Volatility% * 100 Ticks * SafetyFactor
-    // SafetyFactor 4 means we cover 4x the hourly volatility
     let dynamicWidth = Math.floor(volPercent * 100 * ATR_SAFETY_FACTOR);
 
     console.log(
         `   [Strategy] ATR: $${atr.toFixed(2)} | Vol: ${volPercent.toFixed(2)}% | Calc Width: ${dynamicWidth}`
     );
 
-    // C. Clamp Limits (Don't go too narrow or too wide)
-    // Min: 500 ticks (Tight)
-    // Max: 4000 ticks (Wide)
-    // WIDTH here represents the "Radius" (half of the total range)
     const WIDTH = Math.max(500, Math.min(dynamicWidth, 4000));
 
     console.log(`   [Strategy] Base Radius Width: ${WIDTH}`);
 
-    // D. Calculate Range with RSI SKEW
     const tickSpace = freshPool.tickSpacing;
     const MIN_TICK = -887272;
     const MAX_TICK = 887272;
 
-    // 1. Get RSI
     const rsi = await getEthRsi("1h");
     console.log(`   [Strategy] RSI Check: ${rsi.toFixed(2)}`);
 
-    // 2. Determine Skew Factor
-    // 0.5 = Symmetric (Default)
-    // > 0.5 = More space above (Bullish)
-    // < 0.5 = More space below (Bearish)
     let skew = 0.5;
 
     if (rsi > 75) {
-        // Overbought -> Price likely to drop.
-        // Skew range DOWN: Less space above, more space below to catch the dip.
         skew = 0.3;
         console.log(`   [Strategy] RSI High -> Skewing Range DOWN (Bearish Setup)`);
     } else if (rsi < 25) {
-        // Oversold -> Price likely to bounce.
-        // Skew range UP: More space above to catch the rally, less space below.
         skew = 0.7;
         console.log(`   [Strategy] RSI Low -> Skewing Range UP (Bullish Setup)`);
     } else {
         console.log(`   [Strategy] RSI Neutral -> Symmetric Range`);
     }
 
-    // 3. Apply Skew
-    // Total span is roughly WIDTH * 2 (since WIDTH was calculated as a radius)
     const totalSpan = WIDTH * 2;
 
     const upperTickDiff = Math.floor(totalSpan * skew);
@@ -422,19 +450,15 @@ export async function executeFullRebalance(
     let tickUpper =
         Math.floor((newCurrentTick + upperTickDiff) / tickSpace) * tickSpace;
 
-    // E. Boundary Checks and Sanitization
     if (tickLower < MIN_TICK)
         tickLower = Math.ceil(MIN_TICK / tickSpace) * tickSpace;
     if (tickUpper > MAX_TICK)
         tickUpper = Math.floor(MAX_TICK / tickSpace) * tickSpace;
 
-    // Ensure tickUpper > tickLower
     if (tickLower >= tickUpper) {
-        // Force minimum spacing if calculation collapsed the range
         tickUpper = tickLower + tickSpace;
     }
 
-    // Clamp again if upper exceeded max due to adjustment
     if (tickUpper > MAX_TICK) {
         tickUpper = Math.floor(MAX_TICK / tickSpace) * tickSpace;
         tickLower = tickUpper - tickSpace;
@@ -446,7 +470,6 @@ export async function executeFullRebalance(
         })`
     );
 
-    // 4. Mint New Position
     const newTokenId = await mintMaxLiquidity(
         wallet,
         freshPool,

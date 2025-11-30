@@ -1,6 +1,5 @@
 import { ethers, NonceManager } from "ethers";
 import { Pool, Position } from "@uniswap/v3-sdk";
-
 import * as dotenv from "dotenv";
 
 import {
@@ -11,21 +10,17 @@ import {
     NPM_ABI,
     NONFUNGIBLE_POSITION_MANAGER_ADDR,
     V3_FACTORY_ADDR,
-    RSI_OVERBOUGHT,
-    RSI_OVERSOLD,
 } from "./config";
 
-import { loadState } from "./src/state"; // Now uses Redis
+import { loadState, scanLocalOrphans } from "./src/state"; // [Added] scanLocalOrphans
 import { approveAll, executeFullRebalance } from "./src/actions";
 import { AaveManager } from "./src/hedge";
 import { RobustProvider } from "./src/connection";
 import { sendEmailAlert } from "./src/utils";
-import { getEthRsi } from "./src/analytics";
 
 dotenv.config();
 
-const HEDGE_CHECK_INTERVAL_MS = 60 * 1000; // 60s Throttle for Rebalance/Hedge
-const HEDGE_THRESHOLD_ETH = ethers.parseEther("0.05"); // Min delta to bother hedging
+const HEDGE_CHECK_INTERVAL_MS = 60 * 1000; 
 
 let wallet: ethers.Wallet;
 let provider: ethers.Provider;
@@ -34,58 +29,44 @@ let npm: ethers.Contract;
 let poolContract: ethers.Contract;
 let aave: AaveManager;
 
-let isProcessing = false; // Lock to prevent overlapping executions
+let isProcessing = false; 
+let lastHedgeTime = 0; 
 
-let lastHedgeTime = 0; // State for throttling
-
-
-let lastRunTime = 0;
-// 强制最小间隔 (毫秒)
-// 3000 = 3秒。对于 500 SGD 的资金量，3秒检查一次非常足够了。
-const MIN_INTERVAL_MS = 3000;
+// Safe Mode Flag
+let isSafeMode = false;
 
 async function initialize() {
     const rpcUrl = process.env.RPC_URL || "";
 
-    // Initialize Robust WebSocket Provider
     robustProvider = new RobustProvider(rpcUrl, async () => {
         console.log("[System] Reconnected. Re-binding events...");
         await setupEventListeners();
     });
 
     provider = robustProvider.getProvider();
-  const baseWallet = new ethers.Wallet(process.env.PRIVATE_KEY!, provider);
+    const baseWallet = new ethers.Wallet(process.env.PRIVATE_KEY!, provider);
     
-    // 1. 创建 NonceManager
     const managedWallet = new NonceManager(baseWallet);
-    
-    // 2. [关键修复] 手动把 address 属性贴上去
-    // 这样 src/hedge.ts 里的 this.wallet.address 就不会报错了
     (managedWallet as any).address = baseWallet.address;
 
-    // 3. 赋值给全局变量
     wallet = managedWallet as any;
-    console.log(`[System] Wallet initialized with NonceManager: ${await wallet.getAddress()}`);
+    console.log(`[System] Wallet initialized: ${await wallet.getAddress()}`);
     
-    const poolAddr = Pool.getAddress(
-        USDC_TOKEN,
-        WETH_TOKEN,
-        POOL_FEE,
-        undefined,
-        V3_FACTORY_ADDR
-    );
+    const poolAddr = Pool.getAddress(USDC_TOKEN, WETH_TOKEN, POOL_FEE, undefined, V3_FACTORY_ADDR);
     poolContract = new ethers.Contract(poolAddr, POOL_ABI, provider);
-    npm = new ethers.Contract(
-        NONFUNGIBLE_POSITION_MANAGER_ADDR,
-        NPM_ABI,
-        wallet
-    );
+    npm = new ethers.Contract(NONFUNGIBLE_POSITION_MANAGER_ADDR, NPM_ABI, wallet);
     aave = new AaveManager(wallet);
 
-    console.log(`[System] Initialized. Wallet: ${wallet.address}`);
+    console.log(`[System] Initialized.`);
 
-    // Initial Checks
     await approveAll(wallet);
+
+    // Orphan Position Scanning
+    // If local state is 0 but on-chain position exists, sync state.
+    const state = loadState();
+    if (state.tokenId === "0") {
+        await scanLocalOrphans(wallet);
+    }
 
     await setupEventListeners();
 }
@@ -95,17 +76,18 @@ async function setupEventListeners() {
     console.log("[System] Listening for blocks...");
 
     provider.on("block", async (blockNumber) => {
-        const now = Date.now();
-        if (now - lastRunTime < MIN_INTERVAL_MS) {
-            return; 
+        // Safe Mode Check
+        if (isSafeMode) {
+            if (blockNumber % 100 === 0) { // Reduce log noise
+                console.warn(`[SafeMode] Bot is in SAFE MODE. No actions taken. Block: ${blockNumber}`);
+            }
+            return;
         }
-
 
         if (isProcessing) return;
         isProcessing = true;
 
         try {
-            lastRunTime = now; // 更新运行时间
             await onNewBlock(blockNumber);
         } catch (e) {
             console.error(`[Block ${blockNumber}] Error:`, e);
@@ -116,14 +98,12 @@ async function setupEventListeners() {
 }
 
 async function onNewBlock(blockNumber: number) {
-    // 1. Load State (Fast, usually local Redis/File)
     const { tokenId } = await loadState();
 
     if (!tokenId || tokenId === "0") {
-        console.log(
-            `[Block ${blockNumber}] No active position. Initializing Strategy...`
-        );
+        console.log(`[Block ${blockNumber}] No active position. Initializing Strategy...`);
 
+        // ... Fetch Pool Data ...
         const [slot0, liquidity] = await Promise.all([
             poolContract.slot0(),
             poolContract.liquidity(),
@@ -138,6 +118,8 @@ async function onNewBlock(blockNumber: number) {
             Number(slot0.tick)
         );
 
+        // If executeFullRebalance throws (e.g. TWAP check failed), catch it here
+        // protects app from crashing, waits for next block retry.
         await executeFullRebalance(wallet, configuredPool, "0");
 
         lastHedgeTime = 0;
@@ -145,60 +127,49 @@ async function onNewBlock(blockNumber: number) {
     }
 
     // ============================================================
-    // CRITICAL PATH: SAFETY CHECK (Every Block, No Throttle)
+    // CRITICAL PATH: SAFETY CHECK
     // ============================================================
-    // This protects against flash crashes or liquidation events.
+    //  If check returns false, enter Safe Mode
     const isSafe = await aave.checkHealthAndPanic(tokenId);
 
     if (!isSafe) {
-        console.log("[System] Panic exit triggered. Halting strategy.");
-        process.exit(1); // Stop the bot
+        console.error("[System] Panic exit triggered. Entering SAFE MODE.");
+        await sendEmailAlert("Bot Stopped", "Entered SAFE MODE after panic exit.");
+        isSafeMode = true; // Lock status, stop all operations
+        return;
     }
 
     // ============================================================
-    // STRATEGY PATH: REBALANCE & HEDGE (Throttled)
+    // STRATEGY PATH
     // ============================================================
 
     const now = Date.now();
     if (now - lastHedgeTime < HEDGE_CHECK_INTERVAL_MS) {
-        return; // Skip delta logic, save RPC/Gas
+        return;
     }
 
     console.log(`[Block ${blockNumber}] Running Strategy Logic...`);
 
-    // Fetch Uniswap Data (RPC Heavy)
     const [slot0, liquidity] = await Promise.all([
         poolContract.slot0(),
         poolContract.liquidity(),
     ]);
 
     const currentTick = Number(slot0.tick);
-    const sqrtPriceX96 = slot0.sqrtPriceX96.toString();
-
-    // Construct Pool
     const configuredPool = new Pool(
         USDC_TOKEN,
         WETH_TOKEN,
         POOL_FEE,
-        sqrtPriceX96,
+        slot0.sqrtPriceX96.toString(),
         liquidity.toString(),
         currentTick
     );
 
-    // Check Rebalance Necessity (Range check)
     const pos = await npm.positions(tokenId);
     if (pos.liquidity === 0n) {
-        // 1. Send Notification
-        await sendEmailAlert(
-            "CRITICAL: Position has 0 Liquidity (Closed).",
-            `Stopping monitor for this ID (${tokenId}).`
-        );
-
-        // 2. Break the loop logic
-        // Option A: If this is a single-run script, exit with error
-        // process.exit(1);
-
-        // Option B: If this is a loop/array, return false/null to signal removal
+        await sendEmailAlert("CRITICAL: Position Closed.", `ID: ${tokenId}`);
+        // Mark as orphan or reset
+        await scanLocalOrphans(wallet); 
         return null;
     }
 
@@ -208,12 +179,11 @@ async function onNewBlock(blockNumber: number) {
     if (currentTick < tl || currentTick > tu) {
         console.log(`[Strategy] Out of Range. Rebalancing...`);    
         await executeFullRebalance(wallet, configuredPool, tokenId);
-        lastHedgeTime = Date.now(); // Reset timer
+        lastHedgeTime = Date.now(); 
         return;
     }
 
-    // Check Hedge Necessity (Delta check)
-    // Calculate ETH Amount in LP
+    // Check Hedge
     const positionSDK = new Position({
         pool: configuredPool,
         liquidity: pos.liquidity.toString(),
@@ -224,14 +194,11 @@ async function onNewBlock(blockNumber: number) {
     const amount0 = BigInt(positionSDK.amount0.quotient.toString());
     const amount1 = BigInt(positionSDK.amount1.quotient.toString());
 
-    // Determine which is ETH based on address sort order
     const lpEthAmount =
         WETH_TOKEN.address.toLowerCase() < USDC_TOKEN.address.toLowerCase()
             ? amount0
             : amount1;
 
-    // Execute Hedge Adjustment
-    // Note: adjustHedge inside AaveManager should calculate debt and compare diff
     await aave.adjustHedge(lpEthAmount, tokenId);
 
     lastHedgeTime = Date.now();

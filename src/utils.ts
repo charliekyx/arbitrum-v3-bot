@@ -4,6 +4,28 @@ import * as nodemailer from "nodemailer";
 
 import { MAX_RETRIES } from "../config";
 
+// Get Uniswap V3 TWAP (Time-Weighted Average Price)
+// Returns the time-weighted average tick for the specified interval.
+export async function getPoolTwap(
+    poolContract: ethers.Contract,
+    twapInterval: number = 300 // Default: 5 minutes (300 seconds)
+): Promise<bigint> {
+    // observe takes an array of secondsAgos: [twapInterval, 0]
+    // Returns corresponding tickCumulatives
+    const [tickCumulatives] = await poolContract.observe([twapInterval, 0]);
+
+    const tickCumulativeBefore = BigInt(tickCumulatives[0]);
+    const tickCumulativeNow = BigInt(tickCumulatives[1]);
+
+    // Average Tick = (TickCumulative_Now - TickCumulative_Before) / TimeInterval
+    const timeWeightedAverageTick = Number(
+        (tickCumulativeNow - tickCumulativeBefore) / BigInt(twapInterval)
+    );
+
+    // Return the tick directly for easier comparison
+    return BigInt(Math.floor(timeWeightedAverageTick));
+}
+
 export function sleep(ms: number) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }

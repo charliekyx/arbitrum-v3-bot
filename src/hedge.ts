@@ -14,6 +14,9 @@ import {
     AAVE_TARGET_HEALTH_FACTOR,
     AAVE_MIN_HEALTH_FACTOR,
     DELTA_NEUTRAL_THRESHOLD,
+    QUOTER_ADDR,
+    QUOTER_ABI,
+    SLIPPAGE_TOLERANCE,
 } from "../config";
 
 import { withRetry, waitWithTimeout, sendEmailAlert } from "./utils";
@@ -26,6 +29,7 @@ export class AaveManager {
     private wallet: ethers.Wallet;
     private poolContract: ethers.Contract;
     private swapRouter: ethers.Contract;
+    private quoter: ethers.Contract;
 
     constructor(wallet: ethers.Wallet) {
         this.wallet = wallet;
@@ -39,6 +43,7 @@ export class AaveManager {
             SWAP_ROUTER_ABI,
             wallet
         );
+        this.quoter = new ethers.Contract(QUOTER_ADDR, QUOTER_ABI, wallet);
     }
 
     // --- Info Getters ---
@@ -93,9 +98,10 @@ export class AaveManager {
     }
 
     /**
-     * borrow more weth from aave ans swap them to USDC for hedging
-     * @param amountEth 
-     * @returns 
+     * Borrow more WETH from Aave and swap them to USDC for hedging.
+     * Includes slippage protection via Quoter.
+     * @param amountEth
+     * @returns
      */
     async increaseShort(amountEth: bigint) {
         const hf = await this.getHealthFactor();
@@ -130,6 +136,22 @@ export class AaveManager {
 
         console.log(`   [Hedge] Selling borrowed ETH for USDC...`);
 
+        // 1. Quote to get minimum output amount
+        const quoteParams = {
+            tokenIn: WETH_TOKEN.address,
+            tokenOut: USDC_TOKEN.address,
+            amountIn: amountEth,
+            fee: POOL_FEE,
+            sqrtPriceLimitX96: 0
+        };
+        const [quotedOut] = await this.quoter.getFunction("quoteExactInputSingle").staticCall(quoteParams);
+        
+        // Apply Slippage
+        const tolerance = BigInt(SLIPPAGE_TOLERANCE.numerator.toString());
+        const basis = BigInt(SLIPPAGE_TOLERANCE.denominator.toString());
+        const amountOutMin = quotedOut * (basis - tolerance) / basis;
+
+        // 2. Execute Swap
         const txSwap = await this.swapRouter.exactInputSingle({
             tokenIn: WETH_TOKEN.address,
             tokenOut: USDC_TOKEN.address,
@@ -137,19 +159,20 @@ export class AaveManager {
             recipient: this.wallet.address,
             deadline: Math.floor(Date.now() / 1000) + 300,
             amountIn: amountEth,
-            amountOutMinimum: 0,
+            amountOutMinimum: amountOutMin,
             sqrtPriceLimitX96: 0,
         });
         await waitWithTimeout(txSwap, TX_TIMEOUT_MS);
-        console.log(`   [Hedge] Short Position Increased.`);
+        console.log(`   [Hedge] Short Position Increased. Sold for ${ethers.formatUnits(quotedOut, 6)} USDC`);
     }
 
     /**
-     * pay back aave with weth, if not enough in the wallet, try swap with USDC first
-     * @param amountEth 
-     * @returns 
+     * Pay back Aave with WETH. If not enough WETH in wallet, try swapping USDC first.
+     * Includes slippage protection and insufficient balance deadlock prevention.
+     * @param amountEth
+     * @returns
      */
-    async decreaseShort(amountEth: bigint, force:boolean = false) {
+    async decreaseShort(amountEth: bigint, force: boolean = false) {
         console.log(
             `   [Hedge] CLOSE SHORT: Repaying ${ethers.formatUnits(amountEth, 18)} ETH...`
         );
@@ -165,23 +188,91 @@ export class AaveManager {
         if (currentWeth < amountEth) {
             const deficit = amountEth - currentWeth;
 
-            const params = {
+            // Check USDC Balance first
+            const usdcContract = new ethers.Contract(USDC_TOKEN.address, ERC20_ABI, this.wallet);
+            const usdcBal = await usdcContract.balanceOf(this.wallet.address);
+
+            // 1. Quote ExactOutput (How much USDC needed to buy exactly `deficit` ETH?)
+            const quoteParams = {
                 tokenIn: USDC_TOKEN.address,
                 tokenOut: WETH_TOKEN.address,
+                amount: deficit,
                 fee: POOL_FEE,
-                recipient: this.wallet.address,
-                deadline: Math.floor(Date.now() / 1000) + 300,
-                amountOut: deficit, // We need exactly this much WETH
-                amountInMaximum: ethers.MaxUint256, // Use as much USDC as needed
-                sqrtPriceLimitX96: 0,
+                sqrtPriceLimitX96: 0
             };
 
-            try {
-                const txSwap = await this.swapRouter.exactOutputSingle(params);
-                await waitWithTimeout(txSwap, TX_TIMEOUT_MS);
+            let amountInMax: bigint;
+            let useExactInput = false;
 
+            try {
+                // QuoterV2 return: (amountIn, ... )
+                const [quotedIn] = await this.quoter.getFunction("quoteExactOutputSingle").staticCall(quoteParams);
+                
+                // Calculate Slippage: Max In = Quoted * (1 + tolerance)
+                const tolerance = BigInt(SLIPPAGE_TOLERANCE.numerator.toString());
+                const basis = BigInt(SLIPPAGE_TOLERANCE.denominator.toString());
+                amountInMax = quotedIn * (basis + tolerance) / basis;
+
+                console.log(`   [Quote] Need ~${ethers.formatUnits(quotedIn, 6)} USDC to buy deficit ETH.`);
+
+                // [Deadlock Logic Fix] Check if USDC is sufficient
+                if (amountInMax > usdcBal) {
+                    console.warn(`   [Hedge] Insufficient USDC for exact repayment. Swapping ALL USDC (${ethers.formatUnits(usdcBal, 6)}) instead.`);
+                    useExactInput = true;
+                }
+
+            } catch (e) {
+                console.warn("   [Hedge] Quote failed (likely insufficient liquidity for ExactOutput). Falling back to ExactInput.");
+                useExactInput = true;
+                amountInMax = 0n; // Not used
+            }
+
+            try {
+                let txSwap;
+                if (useExactInput) {
+                    // Fallback: ExactInputSingle (Sell all USDC)
+                    // We need to re-quote to get minOut
+                    const quoteInParams = {
+                        tokenIn: USDC_TOKEN.address,
+                        tokenOut: WETH_TOKEN.address,
+                        amountIn: usdcBal,
+                        fee: POOL_FEE,
+                        sqrtPriceLimitX96: 0
+                    };
+                    const [qOut] = await this.quoter.getFunction("quoteExactInputSingle").staticCall(quoteInParams);
+                    const tolerance = BigInt(SLIPPAGE_TOLERANCE.numerator.toString());
+                    const basis = BigInt(SLIPPAGE_TOLERANCE.denominator.toString());
+                    const minOut = qOut * (basis - tolerance) / basis;
+
+                    txSwap = await this.swapRouter.exactInputSingle({
+                        tokenIn: USDC_TOKEN.address,
+                        tokenOut: WETH_TOKEN.address,
+                        fee: POOL_FEE,
+                        recipient: this.wallet.address,
+                        deadline: Math.floor(Date.now() / 1000) + 300,
+                        amountIn: usdcBal,
+                        amountOutMinimum: minOut,
+                        sqrtPriceLimitX96: 0,
+                    });
+                } else {
+                    // Standard: ExactOutputSingle
+                    txSwap = await this.swapRouter.exactOutputSingle({
+                        tokenIn: USDC_TOKEN.address,
+                        tokenOut: WETH_TOKEN.address,
+                        fee: POOL_FEE,
+                        recipient: this.wallet.address,
+                        deadline: Math.floor(Date.now() / 1000) + 300,
+                        amountOut: deficit,
+                        amountInMaximum: amountInMax, // Set slippage cap
+                        sqrtPriceLimitX96: 0,
+                    });
+                }
+                
+                await waitWithTimeout(txSwap, TX_TIMEOUT_MS);
+                
                 // Update balance after swap
                 currentWeth = await wethContract.balanceOf(this.wallet.address);
+
             } catch (e) {
                 console.error("   [Hedge] Swap USDC->WETH failed:", e);
                 return; // Stop if swap fails
@@ -189,25 +280,25 @@ export class AaveManager {
         }
 
         // Repay Logic
+        // If we did a fallback swap, we might still not have enough WETH to repay `amountEth`.
+        // So we repay min(currentWeth, amountEth).
+        const repayAmount = currentWeth < amountEth ? currentWeth : amountEth;
 
         try {
             const tx = await this.poolContract.repay(
                 WETH_TOKEN.address,
-                force === true? ethers.MaxUint256 : amountEth, // if force === true, use ethers.MaxUint256 to repay all if close to balance, for panic exit to have a clean repayment
+                force === true ? ethers.MaxUint256 : repayAmount, // If force is true, use MaxUint256 to repay all
                 RATE_MODE_VARIABLE,
                 this.wallet.address
             );
             await waitWithTimeout(tx, TX_TIMEOUT_MS);
-            console.log(`   [Hedge] Repay Confirmed.`);
+            console.log(`   [Hedge] Repay Confirmed (${ethers.formatEther(repayAmount)} ETH).`);
         } catch (e) {
             console.error(`   [Aave] Repay Failed:`, e);
-            sendEmailAlert("[Aave] Repay Failed", "Not enough weth and USDC in the wallet to repay Aave")
+            sendEmailAlert("[Aave] Repay Failed", "Tx Failed or Insufficient Balance");
         }
     }
-
-   /**
-     * PANIC EXIT: Clear all debt and positions
-     */
+    
     async panicExitAll(lpTokenId: string) {
         console.log(`\n[CRITICAL EXIT] Initiating panic cleanup!`);
 
@@ -224,7 +315,7 @@ export class AaveManager {
             if (lpTokenId && lpTokenId !== "0") {
                await atomicExitPosition(this.wallet, lpTokenId);
 
-                await saveState("0"); // the program will restart itself, its important tp reset position token
+                await saveState("0"); // The program will restart itself; it is important to reset position token
                 console.log("   [Panic] LP Closed & State Reset.");
             }
         } catch (e) {
@@ -237,19 +328,19 @@ export class AaveManager {
             const currentDebt = await this.getCurrentEthDebt();
             if (currentDebt > 0n) {
                 console.log(`   [Aave] Found debt: ${ethers.formatEther(currentDebt)} ETH`);
-                await this.decreaseShort(currentDebt, true); // force to use eveything in the wallet to repay aave
+                await this.decreaseShort(currentDebt, true); // Force usage of all assets in wallet to repay Aave
             }
         } catch (e) {
             console.error("   [Panic] Failed to repay Aave debt:", e);
             await sendEmailAlert("[Panic] Failed to repay Aave debt", String(e));
         }
 
-        console.log(`[EXIT] Strategy Stopped.`);
-        process.exit(1);
+        console.log(`[EXIT] Panic Cleanup Complete. Entering SAFE MODE.`);
+        // [Removed] process.exit(1);
     }
 
     async adjustHedge(lpEthAmount: bigint, lpTokenId: string) {
-        // double check safety level 
+        // Double check safety level 
         const hf = await this.getHealthFactor();
         if (hf < AAVE_MIN_HEALTH_FACTOR) {
             await this.panicExitAll(lpTokenId);

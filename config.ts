@@ -56,6 +56,7 @@ export const POOL_ABI = [
     "function slot0() view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint8 feeProtocol, bool unlocked)",
     "function liquidity() view returns (uint128)",
     "function tickSpacing() view returns (int24)",
+    "function observe(uint32[] secondsAgos) view returns (int56[] tickCumulatives, uint160[] secondsPerLiquidityCumulativeX128s)"
 ];
 
 export const NPM_ABI = [
@@ -69,6 +70,7 @@ export const NPM_ABI = [
 
 export const SWAP_ROUTER_ABI = [
     "function exactInputSingle((address tokenIn, address tokenOut, uint24 fee, address recipient, uint256 deadline, uint256 amountIn, uint256 amountOutMinimum, uint160 sqrtPriceLimitX96)) external payable returns (uint256 amountOut)",
+    "function exactOutputSingle((address tokenIn, address tokenOut, uint24 fee, address recipient, uint256 deadline, uint256 amountOut, uint256 amountInMaximum, uint160 sqrtPriceLimitX96)) external payable returns (uint256 amountIn)",
 ];
 
 // Aave V3 Pool ABI
@@ -79,6 +81,11 @@ export const AAVE_POOL_ABI = [
     "function getUserAccountData(address user) external view returns (uint256 totalCollateralBase, uint256 totalDebtBase, uint256 availableBorrowsBase, uint256 currentLiquidationThreshold, uint256 ltv, uint256 healthFactor)",
 ] as const;
 
+export const QUOTER_ABI = [
+    "function quoteExactInputSingle((address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint160 sqrtPriceLimitX96)) external returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)",
+    "function quoteExactOutputSingle((address tokenIn, address tokenOut, uint256 amount, uint24 fee, uint160 sqrtPriceLimitX96)) external returns (uint256 amountIn, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)"
+];
+
 // --- Network Configuration ---
 const safeLower = (addr: string) => addr.toLowerCase();
 
@@ -88,6 +95,7 @@ let USDC_TOKEN_CONF: Token;
 let NPM_ADDR_CONF: string;
 let V3_FACTORY_ADDR_CONF: string;
 let SWAP_ROUTER_ADDR_CONF: string;
+let QUOTER_ADDR_CONF: string;
 
 let AAVE_POOL_ADDR_CONF: string;
 let WETH_DEBT_TOKEN_ADDR_CONF: string;
@@ -123,6 +131,8 @@ if (NETWORK === "MAINNET") {
         "0xE592427A0AEce92De3Edee1F18E0157C05861564"
     );
 
+    QUOTER_ADDR_CONF = safeLower("0x61fFE014bA17989E743c5F6cB21bF9697530B21e");
+
     // Aave V3 Arbitrum Addresses
     AAVE_POOL_ADDR_CONF = safeLower(
         "0x794a61358D6845594F94dc1DB02A252b5b4814aD"
@@ -155,6 +165,7 @@ if (NETWORK === "MAINNET") {
     SWAP_ROUTER_ADDR_CONF = safeLower(
         "0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E"
     );
+    QUOTER_ADDR_CONF = safeLower("0xEd1f6473345F45b75F8179591dd5bA1888cf2FB3");
 
     AAVE_POOL_ADDR_CONF = "0x0000000000000000000000000000000000000000";
     WETH_DEBT_TOKEN_ADDR_CONF = "0x0000000000000000000000000000000000000000";
@@ -166,5 +177,6 @@ export const USDC_TOKEN = USDC_TOKEN_CONF;
 export const NONFUNGIBLE_POSITION_MANAGER_ADDR = NPM_ADDR_CONF;
 export const V3_FACTORY_ADDR = V3_FACTORY_ADDR_CONF;
 export const SWAP_ROUTER_ADDR = SWAP_ROUTER_ADDR_CONF;
+export const QUOTER_ADDR = QUOTER_ADDR_CONF;
 export const AAVE_POOL_ADDR = AAVE_POOL_ADDR_CONF;
 export const WETH_DEBT_TOKEN_ADDR = WETH_DEBT_TOKEN_ADDR_CONF;
