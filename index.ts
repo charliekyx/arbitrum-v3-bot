@@ -35,6 +35,9 @@ let lastHedgeTime = 0;
 // Safe Mode Flag
 let isSafeMode = false;
 
+let lastRunTime = 0;
+const MIN_INTERVAL_MS = 3000;
+
 async function initialize() {
     const rpcUrl = process.env.RPC_URL || "";
 
@@ -76,6 +79,7 @@ async function setupEventListeners() {
     console.log("[System] Listening for blocks...");
 
     provider.on("block", async (blockNumber) => {
+
         // Safe Mode Check
         if (isSafeMode) {
             if (blockNumber % 100 === 0) { // Reduce log noise
@@ -87,7 +91,14 @@ async function setupEventListeners() {
         if (isProcessing) return;
         isProcessing = true;
 
+        const now = Date.now();
+        
+        if (now - lastRunTime < MIN_INTERVAL_MS) {
+            return; 
+        }
+
         try {
+            lastRunTime = now; 
             await onNewBlock(blockNumber);
         } catch (e) {
             console.error(`[Block ${blockNumber}] Error:`, e);

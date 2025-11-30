@@ -74,10 +74,10 @@ export async function getEthAtr(interval: string = '1h', period: number = 14): P
         if (atrResult.length > 0) {
             return atrResult[atrResult.length - 1];
         }
-        return 100; // Default safe fallback (100 USD volatility)
-
+        
+        throw new Error("Insufficient data for ATR");
     } catch (error) {
-        // console.error("ATR calculation failed, using default.");
-        return 100; 
+        console.error(`[Analytics] Failed to fetch ATR: ${(error as Error).message}`);
+        throw error; 
     }
 }
